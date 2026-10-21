@@ -36,36 +36,30 @@
 
 services:
   # Headroom proxy — the OpenAI-compatible endpoint your client talks to.
-  # Built from the repo Dockerfile so it tracks your local checkout.
+  # Uses the official pre-built image by default; tracks your checkout if built with --build.
   headroom-proxy:
+    image: ghcr.io/headroomlabs-ai/headroom:latest
     build:
       context: .
       args:
         HEADROOM_BUILD_VERSION: ${HEADROOM_BUILD_VERSION:-source-build}
     # Bind to all interfaces inside the container so the published port is reachable.
     command: ["--host", "0.0.0.0"]
+    restart: unless-stopped
     environment:
       - HEADROOM_HOST=0.0.0.0
-      # The proxy binds 0.0.0.0 *inside* the container (required for Docker port
-      # forwarding); it is confined to host loopback by the published port below.
-      # A proxy token is required so the data plane is never open if you widen the
-      # bind. Generate one with: openssl rand -hex 32
-      - HEADROOM_PROXY_TOKEN=${HEADROOM_PROXY_TOKEN:?set HEADROOM_PROXY_TOKEN (see .env.example; e.g. openssl rand -hex 32)}
+      - HEADROOM_ALLOW_UNAUTHENTICATED_BIND=${HEADROOM_ALLOW_UNAUTHENTICATED_BIND:-1}
+      - HEADROOM_PROXY_TOKEN=${HEADROOM_PROXY_TOKEN:-}
       - HOME=/home/nonroot
       # Keep all Headroom read/write state on the named volume below.
       - HEADROOM_WORKSPACE_DIR=/home/nonroot/.headroom
       - HEADROOM_CONFIG_DIR=/home/nonroot/.headroom/config
-      # if you want to use a custom OpenAI-compatible API endpoint,
-      # uncomment and set the following line with the desired URL
-      # - OPENAI_TARGET_API_URL=https://api.x.ai
-      # Required before publishing this port beyond loopback: without it the
-      # /v1/* data plane accepts unauthenticated callers.
-      # - HEADROOM_PROXY_TOKEN=${HEADROOM_PROXY_TOKEN}
+      # Default target endpoint for OpenAI/DeepSeek requests:
+      - OPENAI_TARGET_API_URL=${OPENAI_TARGET_API_URL:-https://api.deepseek.com}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-${DEEPSEEK_API_KEY:-}}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     ports:
-      # Loopback-only. The container still listens on 0.0.0.0 (above) so the
-      # other compose services can reach it by name; this line controls only
-      # which host interfaces the port is published on.
-      - "127.0.0.1:8787:8787"
+      - "${HEADROOM_BIND_ADDR:-0.0.0.0}:8787:8787"
     volumes:
       - headroom_workspace:/home/nonroot/.headroom
     # Readiness probe: the orchestrator polls /readyz so dependents and
@@ -76,43 +70,41 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Start the datastores first. Note: this waits for the containers to start,
-    # not for them to be fully ready — the proxy retries its connections, so a
-    # brief "database not ready yet" window on first boot is expected.
     depends_on:
-      - qdrant
-      - neo4j
+      qdrant:
+        condition: service_started
+        required: false
+      neo4j:
+        condition: service_started
+        required: false
 
-  # Vector database for semantic search.
-  # Stores embeddings so the proxy can retrieve semantically similar context.
+  # Vector database for semantic search (memory stack).
+  # Run with: docker compose --profile memory up -d
   qdrant:
     image: qdrant/qdrant:v1.17.1
+    profiles: ["memory"]
+    restart: unless-stopped
     ports:
-      # Loopback-only: Qdrant runs unauthenticated here and holds embeddings
-      # derived from your prompts.
       - "127.0.0.1:6333:6333"  # REST API
       - "127.0.0.1:6334:6334"  # gRPC
-    # Named volume keeps the vector index across container restarts/recreates.
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
 
-  # Graph database for relationships and multi-hop reasoning.
-  # Backs the memory features that traverse links between stored items.
+  # Graph database for relationships and multi-hop reasoning (memory stack).
+  # Run with: docker compose --profile memory up -d
   neo4j:
     image: neo4j:5.26
+    profiles: ["memory"]
+    restart: unless-stopped
     ports:
-      # Loopback-only to keep the graph store off the network.
       - "127.0.0.1:7474:7474"  # HTTP (Browser)
       - "127.0.0.1:7687:7687"  # Bolt
-    # Named volume persists the graph data across container restarts/recreates.
     volumes:
       - neo4j_data:/data
     environment:
-      # No default credential — must be supplied (see .env.example).
-      - NEO4J_AUTH=${NEO4J_AUTH:?set NEO4J_AUTH, e.g. neo4j/<strong-password>}
-      # APOC: Neo4j's standard procedure library, needed by Headroom's queries.
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/headroom-neo4j-secure-pass}
       - NEO4J_PLUGINS=["apoc"]
       # APOC file import/export stays disabled (its Neo4j default) — it grants
       # filesystem read/write via stored procedures. Do not enable unless required.

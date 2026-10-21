@@ -4296,6 +4296,18 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         client = getattr(request, "client", None)
         return bool(_proxy_token) and not is_loopback_host(getattr(client, "host", None))
 
+    def _require_ccr_client(request: Request) -> None:
+        """Allow local callers or remote callers verified by the token gate."""
+        if _authenticated_at_gate(request):
+            return
+        token = os.environ.get("HEADROOM_RETRIEVE_TOKEN")
+        provided = read_proxy_token(request.headers)
+        if token and provided and hmac.compare_digest(
+            token.encode("utf-8"), provided.encode("utf-8", "replace")
+        ):
+            return
+        _require_loopback(request)
+
     def _is_host_of_loopback_published_container(request: Request) -> bool:
         """True for the host's own dashboard reaching a loopback-published container.
 
@@ -5716,7 +5728,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     # CCR (Compress-Cache-Retrieve) endpoints
     @app.post(
         "/v1/retrieve",
-        dependencies=[Depends(_require_loopback), Depends(_require_same_origin)],
+        dependencies=[Depends(_require_ccr_client), Depends(_require_same_origin)],
     )
     async def ccr_retrieve(request: Request):
         """Retrieve original content from CCR compression cache.
@@ -5765,7 +5777,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             ),
         )
 
-    @app.get("/v1/retrieve/stats", dependencies=[Depends(_require_loopback)])
+    @app.get("/v1/retrieve/stats", dependencies=[Depends(_require_ccr_client)])
     async def ccr_stats():
         """Get CCR compression store statistics."""
         store = get_compression_store()
@@ -6067,7 +6079,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             status_code=404, detail=f"No TOIN pattern found with hash starting with: {hash_prefix}"
         )
 
-    @app.get("/v1/retrieve/{hash_key}", dependencies=[Depends(_require_loopback)])
+    @app.get("/v1/retrieve/{hash_key}", dependencies=[Depends(_require_ccr_client)])
     async def ccr_retrieve_get(hash_key: str):
         """GET version of CCR retrieve for easier testing."""
         store = get_compression_store()
@@ -6101,7 +6113,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     # CCR Tool Call Handler - for agent frameworks to call when LLM uses headroom_retrieve
     @app.post(
         "/v1/retrieve/tool_call",
-        dependencies=[Depends(_require_loopback), Depends(_require_same_origin)],
+        dependencies=[Depends(_require_ccr_client), Depends(_require_same_origin)],
     )
     async def ccr_handle_tool_call(request: Request):
         """Handle a CCR tool call from an LLM response.

@@ -1,0 +1,6 @@
+services:
+  headroom-proxy:
+    image: headroom-local:0.41.0-hermes-retrieval
+    pull_policy: never
+    environment:
+      HEADROOM_RETRIEVE_TOKEN: ${HEADROOM_RETRIEVE_TOKEN:?Retrieval token must be configured}
